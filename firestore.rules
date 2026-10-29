@@ -1,0 +1,657 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() { return request.auth != null; }
+    function uid() { return request.auth.uid; }
+    function isOwner(u) { return signedIn() && request.auth.uid == u; }
+    function validUsername(n) { return n is string && n.matches('^[a-z][a-z0-9_]{2,19}$'); }
+    function validText(v, max) { return v is string && v.size() <= max; }
+    function validProfileText(d) {
+      return validText(d.displayName, 50) && d.displayName.size() > 0 && validText(d.bio, 160);
+    }
+    function docPath(col, id) { return /databases/$(database)/documents/$(col)/$(id); }
+    function pairId(a, b) { return a < b ? a + '_' + b : b + '_' + a; }
+    function areFriends(a, b) { return exists(docPath('friendships', pairId(a, b))); }
+    function isBlockedBy(blocker, blocked) { return exists(docPath('blocks', blocker + '_' + blocked)); }
+    // Percakapan: direct = "<uidA>_<uidB>" (terurut), grup = id dokumen grup (20 karakter alfanumerik).
+    function isDirectCid(cid) { return cid.matches('^[A-Za-z0-9]+_[A-Za-z0-9]+$'); }
+    function canReadConv(cid) {
+      return isDirectCid(cid)
+        ? uid() in cid.split('_')
+        : uid() in get(docPath('groups', cid)).data.memberUids;
+    }
+    function canWriteConv(cid) {
+      let parts = cid.split('_');
+      return isDirectCid(cid)
+        ? (uid() in parts && cid == pairId(parts[0], parts[1]) && exists(docPath('friendships', cid))
+           && !isBlockedBy(parts[0], parts[1]) && !isBlockedBy(parts[1], parts[0]))
+        : (uid() in get(docPath('groups', cid)).data.memberUids);
+    }
+    function validGroupName(n) { return n is string && n.size() >= 1 && n.size() <= 40; }
+
+    // Tanpa Cloud Functions (paket Spark): tanggal kalender perangkat (zona waktu mana pun) selalu berada
+    // dalam ±1 hari dari tanggal UTC server. Dipakai untuk membatasi streak/XP yang dihitung di perangkat.
+    function ymd(t) {
+      return string(t.year()) + '-' + (t.month() < 10 ? '0' : '') + string(t.month())
+        + '-' + (t.day() < 10 ? '0' : '') + string(t.day());
+    }
+    function dateKeyOk(s) {
+      return s is string && s.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$')
+        && s >= ymd(request.time - duration.value(1, 'd'))
+        && s <= ymd(request.time + duration.value(1, 'd'));
+    }
+
+    // ---------- Fase 3: username & profil ----------
+    match /usernames/{name} {
+      allow get: if signedIn();
+      allow list: if false;
+      allow create: if signedIn()
+        && validUsername(name)
+        && request.resource.data.keys().hasOnly(['uid', 'createdAt'])
+        && request.resource.data.uid == uid()
+        && request.resource.data.createdAt == request.time
+        && getAfter(docPath('users', uid())).data.username == name;
+      allow update: if false;
+      allow delete: if signedIn() && resource.data.uid == uid();
+    }
+
+    match /users/{u} {
+      allow read: if signedIn();
+      allow create: if isOwner(u)
+        && request.resource.data.keys().hasOnly(['uid', 'username', 'displayName', 'photoURL', 'bio', 'createdAt', 'updatedAt'])
+        && request.resource.data.uid == u
+        && validUsername(request.resource.data.username)
+        && getAfter(docPath('usernames', request.resource.data.username)).data.uid == u
+        && validProfileText(request.resource.data)
+        && (request.resource.data.photoURL == null || validText(request.resource.data.photoURL, 500))
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time;
+      allow update: if isOwner(u)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['displayName', 'bio', 'updatedAt'])
+        && validProfileText(request.resource.data)
+        && request.resource.data.updatedAt == request.time;
+      allow delete: if isOwner(u);
+    }
+
+    // ---------- Fase 4: permintaan pertemanan ----------
+    // ID dokumen = "<fromUid>_<toUid>".
+    match /friendRequests/{reqId} {
+      allow get: if signedIn() && (resource == null
+        || resource.data.fromUid == uid() || resource.data.toUid == uid());
+      allow list: if signedIn() && (resource.data.fromUid == uid() || resource.data.toUid == uid());
+      allow create: if signedIn()
+        && request.resource.data.keys().hasOnly(['fromUid', 'toUid', 'fromUsername', 'status', 'createdAt', 'updatedAt'])
+        && request.resource.data.fromUid == uid()
+        && request.resource.data.toUid is string
+        && request.resource.data.toUid != uid()
+        && reqId == uid() + '_' + request.resource.data.toUid
+        && request.resource.data.status == 'pending'
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time
+        && get(docPath('users', uid())).data.username == request.resource.data.fromUsername
+        && exists(docPath('users', request.resource.data.toUid))
+        && !isBlockedBy(request.resource.data.toUid, uid())
+        && !isBlockedBy(uid(), request.resource.data.toUid)
+        && !areFriends(uid(), request.resource.data.toUid);
+      allow update: if signedIn()
+        && resource.data.toUid == uid()
+        && resource.data.status == 'pending'
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'updatedAt'])
+        && request.resource.data.status in ['accepted', 'declined']
+        && request.resource.data.updatedAt == request.time;
+      allow delete: if signedIn() && (resource == null
+        || resource.data.fromUid == uid()
+        || (resource.data.toUid == uid() && resource.data.status != 'pending'));
+    }
+
+    // ID dokumen = dua uid terurut "<a>_<b>". Dibuat hanya saat penerima menerima permintaan.
+    match /friendships/{pid} {
+      function acceptsRequestFor(members) {
+        let other = members[0] == uid() ? members[1] : members[0];
+        let rid = other + '_' + uid();
+        return get(docPath('friendRequests', rid)).data.status == 'pending'
+          && getAfter(docPath('friendRequests', rid)).data.status == 'accepted'
+          && getAfter(docPath('friendRequests', rid)).data.toUid == uid();
+      }
+      allow get: if signedIn() && (resource == null || uid() in resource.data.members);
+      allow list: if signedIn() && uid() in resource.data.members;
+      allow create: if signedIn()
+        && request.resource.data.keys().hasOnly(['members', 'createdAt'])
+        && request.resource.data.members is list
+        && request.resource.data.members.size() == 2
+        && uid() in request.resource.data.members
+        && pid == pairId(request.resource.data.members[0], request.resource.data.members[1])
+        && request.resource.data.createdAt == request.time
+        && acceptsRequestFor(request.resource.data.members);
+      allow update: if false;
+      allow delete: if signedIn() && (resource == null || uid() in resource.data.members);
+    }
+
+    // ID dokumen = "<blockerUid>_<blockedUid>". Hanya pemblokir yang bisa membaca.
+    match /blocks/{bid} {
+      allow get: if signedIn() && (resource == null || resource.data.blockerUid == uid());
+      allow list: if signedIn() && resource.data.blockerUid == uid();
+      allow create: if signedIn()
+        && request.resource.data.keys().hasOnly(['blockerUid', 'blockedUid', 'blockedUsername', 'createdAt'])
+        && request.resource.data.blockerUid == uid()
+        && request.resource.data.blockedUid is string
+        && request.resource.data.blockedUid != uid()
+        && bid == uid() + '_' + request.resource.data.blockedUid
+        && validUsername(request.resource.data.blockedUsername)
+        && request.resource.data.createdAt == request.time;
+      allow update: if false;
+      allow delete: if signedIn() && (resource == null || resource.data.blockerUid == uid());
+    }
+
+    // Laporan: hanya bisa dibuat, tidak bisa dibaca klien (ditinjau lewat Console/Admin).
+    match /reports/{rid} {
+      allow create: if signedIn()
+        && request.resource.data.keys().hasOnly(['reporterUid', 'reportedUid', 'reason', 'createdAt', 'conversationId', 'messageId'])
+        && (!('messageId' in request.resource.data)
+            || (request.resource.data.messageId is string && request.resource.data.messageId.size() <= 40
+                && request.resource.data.conversationId is string && request.resource.data.conversationId.size() <= 100))
+        && request.resource.data.reporterUid == uid()
+        && request.resource.data.reportedUid is string
+        && request.resource.data.reportedUid != uid()
+        && request.resource.data.reason in ['spam', 'pelecehan', 'akun_palsu', 'lainnya']
+        && request.resource.data.createdAt == request.time;
+      allow read, update, delete: if false;
+    }
+
+    // ---------- Fase 4: Duo & Squad ----------
+    match /groups/{gid} {
+      allow get: if signedIn() && (resource == null || uid() in resource.data.memberUids);
+      allow list: if signedIn() && uid() in resource.data.memberUids;
+      allow create: if signedIn()
+        && gid.matches('^[A-Za-z0-9]{20}$')
+        && request.resource.data.keys().hasOnly(['type', 'name', 'ownerUid', 'memberUids', 'maxMembers', 'createdAt', 'updatedAt'])
+        && request.resource.data.ownerUid == uid()
+        && request.resource.data.memberUids == [uid()]
+        && request.resource.data.type in ['duo', 'squad']
+        && validGroupName(request.resource.data.name)
+        && ((request.resource.data.type == 'duo' && request.resource.data.maxMembers == 2)
+          || (request.resource.data.type == 'squad' && request.resource.data.maxMembers is int
+              && request.resource.data.maxMembers >= 3 && request.resource.data.maxMembers <= 8))
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time;
+      allow update: if signedIn()
+        && request.resource.data.updatedAt == request.time
+        && (
+          // ganti nama (pemilik)
+          (resource.data.ownerUid == uid()
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name', 'updatedAt'])
+            && validGroupName(request.resource.data.name))
+          // bergabung: hanya setelah undangan untuk uid ini diterima pada operasi yang sama
+          || (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['memberUids', 'updatedAt'])
+            && request.resource.data.memberUids.size() == resource.data.memberUids.size() + 1
+            && request.resource.data.memberUids.hasAll(resource.data.memberUids)
+            && uid() in request.resource.data.memberUids
+            && !(uid() in resource.data.memberUids)
+            && request.resource.data.memberUids.size() <= resource.data.maxMembers
+            && get(docPath('invitations', gid + '_' + uid())).data.status == 'pending'
+            && getAfter(docPath('invitations', gid + '_' + uid())).data.status == 'accepted')
+          // keluar sendiri, atau pemilik mengeluarkan anggota
+          || (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['memberUids', 'updatedAt'])
+            && uid() in resource.data.memberUids
+            && request.resource.data.memberUids.size() == resource.data.memberUids.size() - 1
+            && resource.data.memberUids.hasAll(request.resource.data.memberUids)
+            && resource.data.ownerUid in request.resource.data.memberUids
+            && (resource.data.ownerUid == uid() || !(uid() in request.resource.data.memberUids)))
+        );
+      allow delete: if signedIn() && (resource == null || resource.data.ownerUid == uid());
+    }
+
+    // ID dokumen = "<groupId>_<toUid>".
+    match /invitations/{iid} {
+      function validInvitation(d) {
+        let g = getAfter(docPath('groups', d.groupId)).data;
+        return g.ownerUid == uid()
+          && g.name == d.groupName
+          && g.type == d.groupType
+          && !(d.toUid in g.memberUids)
+          && g.memberUids.size() < g.maxMembers;
+      }
+      allow get: if signedIn() && (resource == null
+        || resource.data.fromUid == uid() || resource.data.toUid == uid());
+      allow list: if signedIn() && (resource.data.fromUid == uid() || resource.data.toUid == uid());
+      allow create: if signedIn()
+        && request.resource.data.keys().hasOnly(['groupId', 'groupName', 'groupType', 'fromUid', 'fromUsername', 'toUid', 'status', 'createdAt', 'updatedAt'])
+        && request.resource.data.fromUid == uid()
+        && request.resource.data.toUid is string
+        && request.resource.data.toUid != uid()
+        && iid == request.resource.data.groupId + '_' + request.resource.data.toUid
+        && request.resource.data.status == 'pending'
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time
+        && get(docPath('users', uid())).data.username == request.resource.data.fromUsername
+        && areFriends(uid(), request.resource.data.toUid)
+        && !isBlockedBy(request.resource.data.toUid, uid())
+        && validInvitation(request.resource.data);
+      allow update: if signedIn()
+        && resource.data.toUid == uid()
+        && resource.data.status == 'pending'
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'updatedAt'])
+        && request.resource.data.status in ['accepted', 'declined']
+        && request.resource.data.updatedAt == request.time;
+      allow delete: if signedIn() && (resource == null
+        || resource.data.fromUid == uid()
+        || (resource.data.toUid == uid() && resource.data.status != 'pending'));
+    }
+
+    // ---------- Fase 5: Pet, streak, achievement ----------
+    // Tanpa Cloud Functions (paket Spark): perangkat menghitung, Rules membatasi perubahan agar masuk akal:
+    // lompatan tanggal dibatasi ±1 hari UTC, XP perawatan dibatasi per hari dan jeda aksi, XP strike harus
+    // disertai kenaikan streak pada transaksi yang sama, bonus grup harus cocok dengan groupStreaks.
+    // Rules TIDAK bisa mencegah pemilik akun yang sengaja mengutak-atik angka miliknya sendiri dalam batas itu.
+    match /petProfiles/{u} {
+      function pd() { return request.resource.data; }
+      function stat(v) { return v is number && v >= 0 && v <= 100; }
+      function notFuture(ms) { return ms is number && ms <= request.time.toMillis() + 1800000; }
+      function cooledDown(n, o, cd) { return n == o || (n >= o + cd && notFuture(n)); }
+      function validPetName(n) { return n is string && n.size() >= 1 && n.size() <= 20; }
+
+      function newPetOk() {
+        let n = pd();
+        return n.keys().hasOnly(['species', 'name', 'xp', 'fullness', 'joy', 'cleanliness', 'statsAtMs', 'lastAction', 'xpDay', 'xpToday', 'groupClaims', 'createdAt'])
+          && n.keys().hasAll(['species', 'name', 'xp', 'fullness', 'joy', 'cleanliness', 'statsAtMs', 'lastAction', 'xpDay', 'xpToday', 'groupClaims', 'createdAt'])
+          && n.species in ['mochi', 'bolt', 'luna']
+          && validPetName(n.name)
+          && n.xp == 0 && n.fullness == 80 && n.joy == 80 && n.cleanliness == 80
+          && notFuture(n.statsAtMs)
+          && n.lastAction == {'feed': 0, 'play': 0, 'clean': 0}
+          && dateKeyOk(n.xpDay) && n.xpToday == 0
+          && n.groupClaims == {}
+          && n.createdAt == request.time;
+      }
+      function isRename() {
+        return pd().diff(resource.data).affectedKeys().hasOnly(['name']) && validPetName(pd().name);
+      }
+      // Perawatan (makan/main/bersihkan): XP naik sebesar xpToday, maks 8 per aksi dan 60 per hari.
+      function isCare() {
+        let n = pd();
+        let o = resource.data;
+        return n.diff(o).affectedKeys().hasOnly(['xp', 'fullness', 'joy', 'cleanliness', 'statsAtMs', 'lastAction', 'xpDay', 'xpToday'])
+          && stat(n.fullness) && stat(n.joy) && stat(n.cleanliness)
+          && notFuture(n.statsAtMs) && n.statsAtMs >= o.statsAtMs
+          && dateKeyOk(n.xpDay) && n.xpDay >= o.xpDay
+          && n.xpToday is int && n.xpToday >= 0 && n.xpToday <= 60
+          && n.xp is int && n.xp >= o.xp && n.xp - o.xp <= 8
+          && n.xp - o.xp == (n.xpDay == o.xpDay ? n.xpToday - o.xpToday : n.xpToday)
+          && n.lastAction.keys().hasOnly(['feed', 'play', 'clean'])
+          && n.lastAction.keys().hasAll(['feed', 'play', 'clean'])
+          && cooledDown(n.lastAction.feed, o.lastAction.feed, 1800000)
+          && cooledDown(n.lastAction.play, o.lastAction.play, 1200000)
+          && cooledDown(n.lastAction.clean, o.lastAction.clean, 3600000);
+      }
+      // +10 XP hanya bila streak pribadi naik tepat 1 hari pada transaksi yang sama.
+      function isStrikeXp() {
+        return pd().diff(resource.data).affectedKeys().hasOnly(['xp'])
+          && pd().xp == resource.data.xp + 10
+          && (exists(docPath('streaks', u))
+              ? getAfter(docPath('streaks', u)).data.totalDays == get(docPath('streaks', u)).data.totalDays + 1
+              : getAfter(docPath('streaks', u)).data.totalDays == 1);
+      }
+      // +20 XP satu kali per hari grup lengkap; harus cocok dengan groupStreaks dan anggota grup.
+      function isGroupClaim() {
+        let n = pd();
+        let o = resource.data;
+        let g = n.get('claimGid', '');
+        return n.diff(o).affectedKeys().hasOnly(['xp', 'groupClaims', 'claimGid'])
+          && g is string && g.matches('^[A-Za-z0-9]{20}$')
+          && n.xp == o.xp + 20
+          && n.groupClaims.diff(o.groupClaims).affectedKeys().hasOnly([g])
+          && n.groupClaims[g] == getAfter(docPath('groupStreaks', g)).data.lastCompleteDate
+          && o.groupClaims.get(g, '') != n.groupClaims[g]
+          && uid() in get(docPath('groups', g)).data.memberUids;
+      }
+
+      allow read: if isOwner(u);
+      allow create: if isOwner(u) && newPetOk();
+      allow update: if isOwner(u) && (isRename() || isCare() || isStrikeXp() || isGroupClaim());
+      allow delete: if isOwner(u);
+    }
+
+    match /streaks/{u} {
+      function sd() { return request.resource.data; }
+      function streakKeysOk() {
+        return sd().keys().hasOnly(['current', 'longest', 'totalDays', 'lastDate', 'freezes', 'recentDays'])
+          && sd().keys().hasAll(['current', 'longest', 'totalDays', 'lastDate', 'freezes', 'recentDays']);
+      }
+      allow read: if isOwner(u);
+      allow create: if isOwner(u) && streakKeysOk()
+        && sd().current == 1 && sd().longest == 1 && sd().totalDays == 1 && sd().freezes == 0
+        && dateKeyOk(sd().lastDate) && sd().recentDays == [sd().lastDate];
+      allow update: if isOwner(u) && streakKeysOk()
+        && dateKeyOk(sd().lastDate) && sd().lastDate > resource.data.lastDate
+        && sd().totalDays == resource.data.totalDays + 1
+        && (sd().current == resource.data.current + 1 || sd().current == 1)
+        && sd().longest >= sd().current && sd().longest >= resource.data.longest && sd().longest <= resource.data.longest + 1
+        && sd().freezes is int && sd().freezes >= 0 && sd().freezes <= 2 && sd().freezes <= resource.data.freezes + 1
+        && sd().recentDays is list && sd().recentDays.size() >= 1 && sd().recentDays.size() <= 120
+        && sd().recentDays[sd().recentDays.size() - 1] == sd().lastDate;
+      allow delete: if isOwner(u);
+    }
+
+    match /achievements/{u} {
+      function ach() { return request.resource.data.unlocked; }
+      function has(id) { return id in ach(); }
+      function sAfter() { return getAfter(docPath('streaks', u)).data; }
+      function pAfter() { return getAfter(docPath('petProfiles', u)).data; }
+      allow read: if isOwner(u);
+      allow create, update: if isOwner(u)
+        && request.resource.data.keys().hasOnly(['unlocked'])
+        && ach() is map
+        && ach().keys().hasOnly(['first_strike', 'streak_3', 'streak_7', 'streak_30', 'pet_lvl_3', 'pet_lvl_5', 'pet_lvl_10', 'group_streak_7'])
+        && (resource == null || ach().keys().hasAll(resource.data.unlocked.keys()))
+        && (!has('first_strike') || sAfter().totalDays >= 1)
+        && (!has('streak_3') || sAfter().longest >= 3)
+        && (!has('streak_7') || sAfter().longest >= 7)
+        && (!has('streak_30') || sAfter().longest >= 30)
+        && (!has('pet_lvl_3') || pAfter().xp >= 80)
+        && (!has('pet_lvl_5') || pAfter().xp >= 320)
+        && (!has('pet_lvl_10') || pAfter().xp >= 1620);
+      allow delete: if isOwner(u);
+    }
+
+    // Streak grup: ditulis oleh anggota. Hari dianggap lengkap hanya bila SEMUA anggota saat ini sudah strike.
+    match /groupStreaks/{gid} {
+      function gd() { return request.resource.data; }
+      function gMembers() { return get(docPath('groups', gid)).data.memberUids; }
+      function gStreakCommon() {
+        return gd().keys().hasOnly(['tz', 'current', 'longest', 'lastCompleteDate', 'dayDate', 'dayUids'])
+          && gd().keys().hasAll(['tz', 'current', 'longest', 'lastCompleteDate', 'dayDate', 'dayUids'])
+          && gd().tz is string && gd().tz.size() <= 64
+          && dateKeyOk(gd().dayDate)
+          && gd().dayUids is list && gd().dayUids.size() <= 8 && uid() in gd().dayUids
+          && gd().dayUids.toSet().difference(gMembers().toSet()).size() == 0
+          && gd().current is int && gd().current >= 0
+          && gd().longest is int && gd().longest >= gd().current;
+      }
+      allow get: if signedIn() && uid() in get(docPath('groups', gid)).data.memberUids;
+      allow list: if false;
+      allow create: if signedIn() && uid() in gMembers() && gStreakCommon()
+        && gd().dayUids == [uid()] && gd().current <= 1 && gd().longest <= 1
+        && (gd().lastCompleteDate == null
+            ? gd().current == 0
+            : (gd().lastCompleteDate == gd().dayDate && gd().dayUids.hasAll(gMembers()) && gd().current == 1));
+      allow update: if signedIn() && uid() in gMembers() && gStreakCommon()
+        && gd().tz == resource.data.tz
+        && gd().dayDate >= resource.data.dayDate
+        && (gd().dayDate == resource.data.dayDate
+            ? (gd().dayUids.hasAll(resource.data.dayUids) && gd().dayUids.size() <= resource.data.dayUids.size() + 1)
+            : gd().dayUids == [uid()])
+        && gd().current <= resource.data.current + 1
+        && gd().longest >= resource.data.longest && gd().longest <= resource.data.longest + 1
+        && (gd().lastCompleteDate == resource.data.lastCompleteDate
+            || (gd().lastCompleteDate == gd().dayDate && gd().dayUids.hasAll(gMembers())
+                && (resource.data.lastCompleteDate == null || gd().lastCompleteDate > resource.data.lastCompleteDate)));
+      allow delete: if signedIn() && get(docPath('groups', gid)).data.ownerUid == uid();
+    }
+
+    // ---------- Fase 6: chat ----------
+    // Metadata percakapan (pratinjau pesan terakhir). Akses diturunkan dari id: pasangan teman atau anggota grup.
+    match /conversations/{cid} {
+      function isNewMessageMeta() {
+        let d = request.resource.data;
+        return d.keys().hasOnly(['type', 'lastText', 'lastSenderUid', 'lastMessageAt', 'lastMessageId'])
+          && d.type == (isDirectCid(cid) ? 'direct' : 'group')
+          && d.lastSenderUid == uid()
+          && d.lastText is string && d.lastText.size() <= 120
+          && d.lastMessageAt == request.time
+          && d.lastMessageId is string && d.lastMessageId.size() <= 40
+          && getAfter(/databases/$(database)/documents/conversations/$(cid)/messages/$(d.lastMessageId)).data.senderUid == uid();
+      }
+      function isPreviewTouch() {
+        return request.resource.data.diff(resource.data).affectedKeys().hasOnly(['lastText'])
+          && resource.data.lastSenderUid == uid()
+          && request.resource.data.lastText is string && request.resource.data.lastText.size() <= 120;
+      }
+      allow get: if signedIn() && canReadConv(cid);
+      allow list: if false;
+      allow create: if signedIn() && canWriteConv(cid) && isNewMessageMeta();
+      allow update: if signedIn() && canWriteConv(cid) && (isNewMessageMeta() || isPreviewTouch());
+      // Hanya pemilik grup (saat menghapus akunnya); percakapan pribadi tidak bisa dihapus.
+      allow delete: if signedIn() && !isDirectCid(cid) && get(docPath('groups', cid)).data.ownerUid == uid();
+
+      match /messages/{mid} {
+        function isEdit() {
+          return resource.data.senderUid == uid() && resource.data.deleted == false
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['text', 'editedAt'])
+            && request.resource.data.text is string
+            && request.resource.data.text.size() >= 1 && request.resource.data.text.size() <= 2000
+            && request.resource.data.editedAt == request.time
+            && request.time < resource.data.createdAt + duration.value(15, 'm');
+        }
+        function isSoftDelete() {
+          return resource.data.senderUid == uid()
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['deleted', 'text'])
+            && request.resource.data.deleted == true && request.resource.data.text == '';
+        }
+        function isReaction() {
+          return request.resource.data.diff(resource.data).affectedKeys().hasOnly(['reactions'])
+            && request.resource.data.reactions.diff(resource.data.reactions).affectedKeys().hasOnly([uid()])
+            && (request.resource.data.reactions.get(uid(), null) == null
+                || request.resource.data.reactions.get(uid(), null) in ['👍', '💜', '😂', '😮', '😢', '🔥']);
+        }
+        function mediaDocOk(id) {
+          let m = get(docPath('mediaMetadata', id)).data;
+          return m.ownerUid == uid() && m.status == 'available' && m.context == 'chat' && m.conversationId == cid;
+        }
+        function mediaOk() {
+          let id = request.resource.data.get('mediaId', null);
+          return id == null || (id is string && id.size() <= 40 && mediaDocOk(id));
+        }
+        allow get, list: if signedIn() && canReadConv(cid);
+        allow create: if signedIn() && canWriteConv(cid)
+          && request.resource.data.keys().hasOnly(['senderUid', 'text', 'createdAt', 'replyToId', 'editedAt', 'deleted', 'reactions', 'mediaId'])
+          && request.resource.data.senderUid == uid()
+          && request.resource.data.text is string
+          && request.resource.data.text.size() <= 2000
+          && (request.resource.data.text.size() >= 1 || request.resource.data.get('mediaId', null) != null)
+          && request.resource.data.createdAt == request.time
+          && request.resource.data.editedAt == null
+          && request.resource.data.deleted == false
+          && request.resource.data.reactions == {}
+          && mediaOk()
+          && (request.resource.data.replyToId == null
+              || (request.resource.data.replyToId is string && request.resource.data.replyToId.size() <= 40
+                  && exists(/databases/$(database)/documents/conversations/$(cid)/messages/$(request.resource.data.replyToId))));
+        allow update: if signedIn()
+          && ((canReadConv(cid) && isSoftDelete()) || (canWriteConv(cid) && (isEdit() || isReaction())));
+        allow delete: if signedIn() && !isDirectCid(cid) && get(docPath('groups', cid)).data.ownerUid == uid();
+      }
+
+      // Tanda sudah dibaca (hanya ditulis bila pengguna mengaktifkan read receipt).
+      match /reads/{u} {
+        allow get: if signedIn() && canReadConv(cid);
+        allow list: if false;
+        allow write: if signedIn() && u == uid() && canReadConv(cid)
+          && request.resource.data.keys().hasOnly(['lastReadAt'])
+          && request.resource.data.lastReadAt == request.time;
+      }
+    }
+
+    // Status baca pribadi + mute per percakapan (tidak terlihat orang lain).
+    match /users/{u}/chatState/{cid} {
+      allow read, delete: if isOwner(u);
+      allow create, update: if isOwner(u)
+        && request.resource.data.keys().hasOnly(['lastReadAt', 'muted'])
+        && (!('lastReadAt' in request.resource.data) || request.resource.data.lastReadAt is timestamp)
+        && (!('muted' in request.resource.data) || request.resource.data.muted is bool);
+    }
+
+    match /userSettings/{u} {
+      allow read, delete: if isOwner(u);
+      allow create, update: if isOwner(u)
+        && request.resource.data.keys().hasOnly(['readReceipts', 'showOnline', 'remindStreak', 'remindPet', 'notifyMessages', 'notifyLocation'])
+        && request.resource.data.get('readReceipts', false) is bool
+        && request.resource.data.get('showOnline', false) is bool
+        && request.resource.data.get('remindStreak', false) is bool
+        && request.resource.data.get('remindPet', false) is bool
+        && request.resource.data.get('notifyMessages', false) is bool
+        && request.resource.data.get('notifyLocation', false) is bool;
+    }
+
+    // ---------- Fase 7: media (tanpa Cloud Storage) ----------
+    // Cloud Storage dan Cloud Functions butuh paket Blaze, jadi isi berkas dititipkan sementara sebagai potongan
+    // (mediaBlobs/{id}/parts). Alur: pengirim membuat metadata "uploading" (+ daftar penerima), mengunggah potongan,
+    // lalu menandainya "available". Penerima mengunduh, menyimpan lokal, mengonfirmasi (receivedBy); setelah semua
+    // penerima mengonfirmasi (atau pengirim menghapus/kedaluwarsa) potongan dihapus. Isi berkas diverifikasi di
+    // perangkat penerima (ukuran + byte awal); Rules membatasi ukuran, jumlah potongan, dan siapa yang berhak membaca.
+    match /mediaMetadata/{mid} {
+      function validNewMedia(d) {
+        return d.kind in ['image', 'video']
+          && d.mime in ['image/jpeg', 'image/png', 'image/webp', 'video/mp4', 'video/webm', 'video/quicktime']
+          && ((d.kind == 'image' && d.mime.matches('image/.*')) || (d.kind == 'video' && d.mime.matches('video/.*')))
+          && d.size is int && d.size > 0
+          && ((d.kind == 'image' && d.size <= 10485760) || (d.kind == 'video' && d.size <= 26214400))
+          && d.chunks is int && d.chunks >= 1 && d.chunks <= 40
+          && d.chunks * 716800 >= d.size && (d.chunks - 1) * 716800 < d.size
+          && d.durationSec is number && d.durationSec >= 0 && d.durationSec <= 30
+          && d.width is int && d.width >= 0 && d.width <= 10000
+          && d.height is int && d.height >= 0 && d.height <= 10000
+          && d.caption is string && d.caption.size() <= 200;
+      }
+      // Penerima dipilih pengirim: chat pribadi = lawan bicara, chat grup = anggota grup, story = maks 200 orang.
+      function validRecipients(d) {
+        let r = d.recipients;
+        return r is list && r.size() >= 1 && r.size() <= 200 && !(uid() in r) && r.toSet().size() == r.size()
+          && (d.context == 'story'
+              || (isDirectCid(d.conversationId)
+                  ? (r.size() == 1 && r[0] in d.conversationId.split('_'))
+                  : r.toSet().difference(get(docPath('groups', d.conversationId)).data.memberUids.toSet()).size() == 0));
+      }
+      function finalizeOk() {
+        let n = request.resource.data;
+        let o = resource.data;
+        let story = o.context == 'story';
+        return o.ownerUid == uid() && o.status == 'uploading'
+          && n.diff(o).affectedKeys().hasOnly(['status', 'expiresAt', 'storyExpiresAt'])
+          && n.status == 'available'
+          && n.expiresAt is timestamp && n.expiresAt > request.time
+          && n.expiresAt <= request.time + (story ? duration.value(26, 'h') : duration.value(8, 'd'))
+          && (story ? n.storyExpiresAt == n.expiresAt : n.storyExpiresAt == null)
+          && exists(/databases/$(database)/documents/mediaBlobs/$(mid)/parts/$(string(o.chunks - 1)));
+      }
+      function ackOk() {
+        let n = request.resource.data;
+        let o = resource.data;
+        return uid() in o.recipients && o.status == 'available'
+          && n.diff(o).affectedKeys().hasOnly(['receivedBy'])
+          && n.receivedBy.hasAll(o.receivedBy)
+          && uid() in n.receivedBy
+          && n.receivedBy.toSet().difference(o.receivedBy.toSet()).hasOnly([uid()])
+          && n.receivedBy.toSet().size() == n.receivedBy.size();
+      }
+      function retireOk() {
+        let n = request.resource.data;
+        let o = resource.data;
+        return (o.status == 'available' || o.status == 'uploading')
+          && n.diff(o).affectedKeys().hasOnly(['status', 'reason', 'deletedAt'])
+          && n.status in ['deleted', 'expired']
+          && n.deletedAt == request.time
+          && ((o.ownerUid == uid() && n.reason in ['owner', 'expired', 'upload_stalled'])
+              || (o.status == 'available' && uid() in o.recipients
+                  && ((n.reason == 'delivered' && o.receivedBy.hasAll(o.recipients))
+                      || (n.reason == 'expired' && request.time > o.expiresAt))));
+      }
+      allow get: if signedIn() && (resource == null
+        || resource.data.ownerUid == uid() || uid() in resource.data.recipients);
+      allow list: if signedIn() && (resource.data.ownerUid == uid() || uid() in resource.data.recipients);
+      allow create: if signedIn()
+        && mid.matches('^[A-Za-z0-9]{20}$')
+        && request.resource.data.keys().hasOnly(['ownerUid', 'context', 'conversationId', 'kind', 'mime', 'size', 'chunks', 'width', 'height', 'durationSec', 'caption', 'recipients', 'receivedBy', 'status', 'createdAt'])
+        && request.resource.data.ownerUid == uid()
+        && request.resource.data.status == 'uploading'
+        && request.resource.data.receivedBy == []
+        && request.resource.data.createdAt == request.time
+        && validNewMedia(request.resource.data)
+        && ((request.resource.data.context == 'story' && request.resource.data.conversationId == null)
+          || (request.resource.data.context == 'chat' && request.resource.data.conversationId is string
+              && canWriteConv(request.resource.data.conversationId)))
+        && validRecipients(request.resource.data);
+      allow update: if signedIn() && (finalizeOk() || ackOk() || retireOk());
+      // Hapus dokumen hanya oleh pemilik (hapus akun); hapus potongan lebih dulu.
+      allow delete: if signedIn() && resource.data.ownerUid == uid();
+    }
+
+    // Potongan isi berkas (maks 700 KB per dokumen agar di bawah batas 1 MiB Firestore).
+    match /mediaBlobs/{mid}/parts/{n} {
+      function meta() { return get(docPath('mediaMetadata', mid)).data; }
+      function chunkOk() {
+        let d = request.resource.data;
+        return d.keys().hasOnly(['n', 'data', 'expireAt']) && d.keys().hasAll(['n', 'data'])
+          && d.n is int && d.n >= 0 && d.n < meta().chunks && string(d.n) == n
+          && d.data is bytes && d.data.size() > 0 && d.data.size() <= 716800
+          && (!('expireAt' in d) || d.expireAt is timestamp);
+      }
+      allow create, update: if signedIn() && meta().ownerUid == uid() && meta().status == 'uploading' && chunkOk();
+      allow get, list: if signedIn() && meta().status == 'available' && uid() in meta().recipients
+        && !isBlockedBy(meta().ownerUid, uid()) && !isBlockedBy(uid(), meta().ownerUid);
+      allow delete: if signedIn() && (meta().ownerUid == uid()
+        || (uid() in meta().recipients
+            && (meta().status in ['deleted', 'expired']
+                || (meta().status == 'available' && request.time > meta().expiresAt))));
+    }
+
+    // ---------- Fase 8: sesi lokasi ----------
+    // Tanpa Cloud Functions: pemilik membuat/mengakhiri sesinya sendiri. Rules memastikan pemilik dan penerima
+    // adalah anggota grup, durasi diizinkan, dan masa berlaku dibatasi. Koordinat aktif ada di Realtime Database
+    // (lihat database.rules.json). Di sini hanya metadata + riwayat opsional milik pemilik.
+    match /locationSessions/{sid} {
+      function validAudience(d) {
+        let g = get(docPath('groups', d.groupId)).data;
+        return uid() in g.memberUids && d.groupName == g.name
+          && d.viewerUids is list && d.viewerUids.size() >= 1 && d.viewerUids.size() <= 7
+          && !(uid() in d.viewerUids)
+          && d.viewerUids.toSet().size() == d.viewerUids.size()
+          && d.viewerUids.toSet().difference(g.memberUids.toSet()).size() == 0;
+      }
+      allow get: if signedIn() && (resource == null
+        || resource.data.ownerUid == uid() || uid() in resource.data.viewerUids);
+      allow list: if signedIn() && (resource.data.ownerUid == uid() || uid() in resource.data.viewerUids);
+      allow create: if signedIn()
+        && request.resource.data.keys().hasOnly(['ownerUid', 'groupId', 'groupName', 'viewerUids', 'status', 'historyEnabled', 'durationMin', 'startedAt', 'expiresAt', 'endedAt'])
+        && request.resource.data.keys().hasAll(['ownerUid', 'groupId', 'groupName', 'viewerUids', 'status', 'historyEnabled', 'durationMin', 'startedAt', 'expiresAt', 'endedAt'])
+        && request.resource.data.ownerUid == uid()
+        && request.resource.data.groupId is string && request.resource.data.groupId.matches('^[A-Za-z0-9]{20}$')
+        && request.resource.data.status == 'active'
+        && request.resource.data.historyEnabled is bool
+        && request.resource.data.durationMin in [15, 60, 240, 480]
+        && request.resource.data.startedAt == request.time
+        && request.resource.data.expiresAt is timestamp
+        && request.resource.data.expiresAt > request.time
+        && request.resource.data.expiresAt <= request.time + duration.value(request.resource.data.durationMin + 15, 'm')
+        && request.resource.data.endedAt == null
+        && validAudience(request.resource.data);
+      // Hanya pemilik yang mengakhiri sesinya; "expired" hanya setelah lewat waktu.
+      allow update: if signedIn() && resource.data.ownerUid == uid() && resource.data.status == 'active'
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'endedAt'])
+        && request.resource.data.status in ['stopped', 'expired']
+        && (request.resource.data.status == 'stopped' || request.time >= resource.data.expiresAt)
+        && request.resource.data.endedAt == request.time;
+      allow delete: if signedIn() && resource.data.ownerUid == uid() && resource.data.status != 'active';
+
+      // Riwayat rute: hanya bila pemilik mengaktifkannya untuk sesi ini; hanya pemilik yang bisa membaca.
+      match /points/{pid} {
+        function session() { return get(/databases/$(database)/documents/locationSessions/$(sid)).data; }
+        allow read, delete: if signedIn() && session().ownerUid == uid();
+        allow create: if signedIn()
+          && session().ownerUid == uid()
+          && session().historyEnabled == true
+          && session().status == 'active'
+          && request.time < session().expiresAt
+          && request.resource.data.keys().hasOnly(['lat', 'lng', 'acc', 'speed', 'ts'])
+          && request.resource.data.lat is number && request.resource.data.lat >= -90 && request.resource.data.lat <= 90
+          && request.resource.data.lng is number && request.resource.data.lng >= -180 && request.resource.data.lng <= 180
+          && request.resource.data.acc is number
+          && (request.resource.data.speed == null || request.resource.data.speed is number)
+          && request.resource.data.ts == request.time;
+        allow update: if false;
+      }
+    }
+
+    match /{document=**} { allow read, write: if false; }
+  }
+}
