@@ -1,0 +1,8 @@
+nama,kategori,path,ukuran,deskripsi
+favicon,ikon,public/favicon.svg,vektor,Favicon SVG logo STRIKE & PET
+icon-192,pwa,public/assets/icon-192.png,192x192,Ikon PWA standar
+icon-512,pwa,public/assets/icon-512.png,512x512,Ikon PWA standar besar
+icon-maskable-512,pwa,public/assets/icon-maskable-512.png,512x512,Ikon PWA maskable (area aman 78%)
+apple-touch-icon,pwa,public/apple-touch-icon.png,180x180,Ikon iOS
+logo,branding,src/components/Logo.tsx,vektor,Logo inline (cakar + petir)
+ilustrasi-onboarding,ilustrasi,src/components/Illustration.tsx,vektor,Tiga ilustrasi onboarding (pet/teman/lokasi)
