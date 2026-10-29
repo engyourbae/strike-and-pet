@@ -1,7 +1,8 @@
 import { FirebaseError } from 'firebase/app';
 import {
   Bytes, Timestamp, arrayUnion, collection, doc, getDoc, getDocs, limit, orderBy, query, runTransaction,
-  serverTimestamp, setDoc, startAfter, updateDoc, where, writeBatch, type QueryDocumentSnapshot,
+  serverTimestamp, setDoc, startAfter, updateDoc, where, writeBatch,
+  type Query, type QueryDocumentSnapshot,
 } from 'firebase/firestore';
 import { getFirebase } from '@/lib/firebase/client';
 import type { LocalMedia } from '@/lib/local/db';
@@ -188,8 +189,11 @@ export async function downloadMediaBlob(id: string, maxBytes: number): Promise<B
   let last: QueryDocumentSnapshot | null = null;
   const col = collection(db, 'mediaBlobs', id, 'parts');
   for (;;) {
-    const q = last ? query(col, orderBy('n'), startAfter(last), limit(READ_PAGE)) : query(col, orderBy('n'), limit(READ_PAGE));
-    const page = await getDocs(q);
+  const q: Query = last
+    ? query(col, orderBy('n'), startAfter(last), limit(READ_PAGE))
+    : query(col, orderBy('n'), limit(READ_PAGE));
+
+  const page = await getDocs(q);
     for (const d of page.docs) {
       const bytes = (d.data().data as Bytes).toUint8Array();
       total += bytes.length;
