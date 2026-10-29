@@ -1,0 +1,112 @@
+{
+  "rules": {
+    ".read": false,
+    ".write": false,
+    "typing": {
+      "$cid": {
+        ".read": "auth != null",
+        "$uid": {
+          ".write": "auth != null && auth.uid === $uid",
+          ".validate": "newData.isNumber()"
+        }
+      }
+    },
+    "presence": {
+      "$uid": {
+        ".read": "auth != null",
+        ".write": "auth != null && auth.uid === $uid",
+        ".validate": "newData.hasChildren(['online', 'lastChanged'])",
+        "online": {
+          ".validate": "newData.isBoolean()"
+        },
+        "lastChanged": {
+          ".validate": "newData.isNumber()"
+        },
+        "$other": {
+          ".validate": false
+        }
+      }
+    },
+    "locations": {
+      "$sid": {
+        ".write": "auth != null && !newData.exists() && data.child('meta').child('ownerUid').val() === auth.uid",
+        "meta": {
+          ".read": "auth != null && (root.child('locations').child($sid).child('meta').child('ownerUid').val() === auth.uid || root.child('locations').child($sid).child('meta').child('viewers').child(auth.uid).val() === true)",
+          ".write": "auth != null && !data.exists() && newData.child('ownerUid').val() === auth.uid",
+          ".validate": "newData.hasChildren(['ownerUid', 'viewers', 'expiresAt', 'active'])",
+          "ownerUid": {
+            ".validate": "newData.val() === auth.uid"
+          },
+          "viewers": {
+            ".validate": "newData.numChildren() >= 1 && newData.numChildren() <= 7",
+            "$viewer": {
+              ".validate": "newData.val() === true && $viewer !== auth.uid"
+            }
+          },
+          "expiresAt": {
+            ".validate": "newData.isNumber() && newData.val() > now && newData.val() <= now + 29700000"
+          },
+          "active": {
+            ".write": "auth != null && root.child('locations').child($sid).child('meta').child('ownerUid').val() === auth.uid && newData.val() === false",
+            ".validate": "newData.isBoolean() && (data.exists() ? newData.val() === false : newData.val() === true)"
+          },
+          "$other": {
+            ".validate": false
+          }
+        },
+        "pos": {
+          ".read": "auth != null && root.child('locations').child($sid).child('meta').child('active').val() === true && root.child('locations').child($sid).child('meta').child('expiresAt').val() > now && (root.child('locations').child($sid).child('meta').child('ownerUid').val() === auth.uid || root.child('locations').child($sid).child('meta').child('viewers').child(auth.uid).val() === true)",
+          ".write": "auth != null && root.child('locations').child($sid).child('meta').child('ownerUid').val() === auth.uid && root.child('locations').child($sid).child('meta').child('active').val() === true && root.child('locations').child($sid).child('meta').child('expiresAt').val() > now",
+          ".validate": "newData.hasChildren(['lat', 'lng', 'ts']) && (!data.exists() || newData.child('ts').val() >= data.child('ts').val() + 2000)",
+          "lat": {
+            ".validate": "newData.isNumber() && newData.val() >= -90 && newData.val() <= 90"
+          },
+          "lng": {
+            ".validate": "newData.isNumber() && newData.val() >= -180 && newData.val() <= 180"
+          },
+          "acc": {
+            ".validate": "newData.isNumber() && newData.val() >= 0"
+          },
+          "speed": {
+            ".validate": "newData.isNumber() && newData.val() >= 0 && newData.val() <= 120"
+          },
+          "src": {
+            ".validate": "newData.val() === 'gps' || newData.val() === 'estimated'"
+          },
+          "trust": {
+            ".validate": "newData.isBoolean()"
+          },
+          "max": {
+            ".validate": "newData.isNumber() && newData.val() >= 0 && newData.val() <= 120"
+          },
+          "avg": {
+            ".validate": "newData.isNumber() && newData.val() >= 0 && newData.val() <= 120"
+          },
+          "ts": {
+            ".validate": "newData.isNumber() && newData.val() <= now"
+          },
+          "$other": {
+            ".validate": false
+          }
+        },
+        "conn": {
+          ".read": "auth != null && root.child('locations').child($sid).child('meta').child('active').val() === true && root.child('locations').child($sid).child('meta').child('expiresAt').val() > now && (root.child('locations').child($sid).child('meta').child('ownerUid').val() === auth.uid || root.child('locations').child($sid).child('meta').child('viewers').child(auth.uid).val() === true)",
+          ".write": "auth != null && root.child('locations').child($sid).child('meta').child('ownerUid').val() === auth.uid && root.child('locations').child($sid).child('meta').child('active').val() === true && root.child('locations').child($sid).child('meta').child('expiresAt').val() > now",
+          ".validate": "newData.hasChildren(['online', 'ts'])",
+          "online": {
+            ".validate": "newData.isBoolean()"
+          },
+          "ts": {
+            ".validate": "newData.isNumber()"
+          },
+          "$other": {
+            ".validate": false
+          }
+        },
+        "$other": {
+          ".validate": false
+        }
+      }
+    }
+  }
+}

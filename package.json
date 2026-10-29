@@ -1,0 +1,45 @@
+{
+  "name": "strike-and-pet",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && tsc -p tsconfig.node.json --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.node.json --noEmit",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "icons": "python3 scripts/generate-icons.py",
+    "emulators": "firebase emulators:start",
+    "test:rules": "firebase emulators:exec --only firestore,database --project demo-strike-pet \"vitest run -c vitest.rules.config.ts\""
+  },
+  "dependencies": {
+    "dexie": "^4.0.10",
+    "firebase": "^10.14.1",
+    "leaflet": "^1.9.4",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.28.0",
+    "workbox-window": "^7.3.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.16.0",
+    "@firebase/rules-unit-testing": "^3.0.4",
+    "@types/leaflet": "^1.9.14",
+    "@types/node": "^22.10.0",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "eslint": "^9.16.0",
+    "eslint-plugin-react-hooks": "^5.1.0",
+    "fake-indexeddb": "^6.0.0",
+    "firebase-tools": "^13.29.1",
+    "globals": "^15.13.0",
+    "typescript": "^5.6.3",
+    "typescript-eslint": "^8.17.0",
+    "vite": "^5.4.11",
+    "vite-plugin-pwa": "^0.21.1",
+    "vitest": "^2.1.8"
+  }
+}
