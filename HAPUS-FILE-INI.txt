@@ -1,0 +1,13 @@
+Setelah menimpa file dari zip ini ke folder strike-and-pet,
+HAPUS file/folder berikut dari proyekmu (sudah tidak dipakai di paket gratis):
+
+functions/                          (seluruh folder)
+storage.rules
+scripts/sync-functions-logic.mjs
+src/lib/firebase/functions.ts
+src/lib/firebase/storage.ts
+tests-rules/storage.test.ts
+
+Perintah cepat (jalankan di dalam folder strike-and-pet):
+  rm -rf functions storage.rules scripts/sync-functions-logic.mjs src/lib/firebase/functions.ts src/lib/firebase/storage.ts tests-rules/storage.test.ts
+(Windows PowerShell: Remove-Item -Recurse -Force functions, storage.rules, scripts\sync-functions-logic.mjs, src\lib\firebase\functions.ts, src\lib\firebase\storage.ts, tests-rules\storage.test.ts)
