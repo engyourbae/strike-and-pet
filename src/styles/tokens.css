@@ -1,0 +1,52 @@
+:root {
+  --color-primary: #5b3df5;
+  --color-primary-hover: #4a2ee0;
+  --color-on-primary: #ffffff;
+  --color-secondary: #0e9f94;
+  --color-accent: #ff7a59;
+  --bg: #f4f5fb;
+  --surface: #ffffff;
+  --surface-2: #eceef8;
+  --border: #dadded;
+  --text: #161a33;
+  --text-2: #565c7c;
+  --success: #0e8a5f;
+  --warning: #a96a0e;
+  --error: #c93a4b;
+  --focus-ring: 0 0 0 3px rgba(91, 61, 245, 0.35);
+  --shadow-sm: 0 1px 2px rgba(22, 26, 51, 0.06);
+  --shadow-md: 0 8px 24px rgba(22, 26, 51, 0.1);
+  --radius-sm: 8px;
+  --radius-md: 14px;
+  --radius-lg: 22px;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --font: ui-rounded, 'SF Pro Rounded', 'Nunito', 'Segoe UI', system-ui, -apple-system, sans-serif;
+  --fs-sm: 0.875rem;
+  --fs-md: 1rem;
+  --fs-lg: 1.25rem;
+  --fs-xl: 1.75rem;
+  --control-h: 48px;
+}
+:root[data-theme='dark'] {
+  --color-primary: #7660ff;
+  --color-primary-hover: #8873ff;
+  --color-secondary: #2fd0c3;
+  --color-accent: #ff8f72;
+  --bg: #0f1226;
+  --surface: #181c38;
+  --surface-2: #212649;
+  --border: #2e3460;
+  --text: #eef0ff;
+  --text-2: #a4aad0;
+  --success: #3ccf9a;
+  --warning: #e8b04a;
+  --error: #ff6b7d;
+  --focus-ring: 0 0 0 3px rgba(136, 115, 255, 0.5);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.45);
+}
